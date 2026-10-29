@@ -3,8 +3,12 @@ on:
   push:
     branches:
       - master
+      - adaptation/v4.1.4
+permissions:
+  contents: read
+  packages: write
 env:
-  image-push-owner: 'k8snetworkplumbingwg'
+  image-push-owner: 'nebius'
 jobs:
   push-thick:
     name: Image push thick image
@@ -33,8 +37,9 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository }}:latest-thick
             ghcr.io/${{ github.repository }}:snapshot-thick
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
           file: images/Dockerfile.thick
-          platforms: linux/amd64,linux/arm64,linux/arm/v7,linux/arm/v8,linux/ppc64le,linux/s390x
+          platforms: linux/amd64,linux/arm64
           sbom: false
           provenance: false
 
@@ -65,8 +70,9 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository }}:latest
             ghcr.io/${{ github.repository }}:snapshot
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
           file: images/Dockerfile
-          platforms: linux/amd64,linux/arm64,linux/arm/v7,linux/arm/v8,linux/ppc64le,linux/s390x
+          platforms: linux/amd64,linux/arm64
           sbom: false
           provenance: false
 
@@ -79,8 +85,9 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository }}:latest-debug
             ghcr.io/${{ github.repository }}:snapshot-debug
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
           file: images/Dockerfile.debug
-          platforms: linux/amd64,linux/arm64,linux/arm/v7,linux/arm/v8,linux/ppc64le,linux/s390x
+          platforms: linux/amd64,linux/arm64
           sbom: false
           provenance: false
 
