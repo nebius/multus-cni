@@ -17,6 +17,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -43,6 +44,10 @@ const (
 	MultusHealthAPIEndpoint = "/healthz"
 )
 
+// errDaemonUnavailable distinguishes communication failures from daemon-reported
+// CNI errors. Returning the latter on DEL can prevent sandbox teardown indefinitely.
+var errDaemonUnavailable = errors.New("communication with multus daemon failed")
+
 // DoCNI sends a CNI request to the CNI server via JSON + HTTP over a root-owned unix socket,
 // and returns the result
 func DoCNI(url string, req interface{}, socketPath string) ([]byte, error) {
@@ -58,16 +63,17 @@ func DoCNI(url string, req interface{}, socketPath string) ([]byte, error) {
 			},
 		},
 	}
+	defer client.CloseIdleConnections()
 
 	resp, err := client.Post(url, "application/json", bytes.NewReader(data))
 	if err != nil {
-		return nil, fmt.Errorf("failed to send CNI request: %v", err)
+		return nil, fmt.Errorf("%w: failed to send CNI request: %v", errDaemonUnavailable, err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read CNI result: %v", err)
+		return nil, fmt.Errorf("%w: failed to read CNI result: %v", errDaemonUnavailable, err)
 	}
 
 	if resp.StatusCode != http.StatusOK {

@@ -16,6 +16,7 @@ package api
 
 import (
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"os"
 	"strings"
@@ -66,10 +67,13 @@ func CmdCheck(args *skel.CmdArgs) error {
 
 // CmdDel implements the CNI spec DEL command handler
 func CmdDel(args *skel.CmdArgs) error {
-	_, _, err := postRequest(args, CheckAPIReadyNow)
+	_, _, err := postRequest(args, WaitUntilAPIReady)
 	if err != nil {
-		// No error in DEL (as of CNI spec)
 		logging.Errorf("CmdDel (shim): %v", err)
+		if stderrors.Is(err, errDaemonUnavailable) {
+			// Avoid runtime suppression of socket errors such as "not found".
+			return errDaemonUnavailable
+		}
 	}
 	return nil
 }
@@ -80,9 +84,8 @@ func postRequest(args *skel.CmdArgs, readinessCheck readyCheckFunc) (*Response, 
 		return nil, "", fmt.Errorf("invalid CNI configuration passed to multus-shim: %w", err)
 	}
 
-	// Execute the readiness check as necessary (e.g. don't wait on CNI DEL)
 	if err := readinessCheck(multusShimConfig.MultusSocketDir); err != nil {
-		return nil, multusShimConfig.CNIVersion, err
+		return nil, multusShimConfig.CNIVersion, fmt.Errorf("%w: %v", errDaemonUnavailable, err)
 	}
 
 	cniRequest, err := newCNIRequest(args)
@@ -93,7 +96,7 @@ func postRequest(args *skel.CmdArgs, readinessCheck readyCheckFunc) (*Response, 
 	var body []byte
 	body, err = DoCNI("http://dummy/cni", cniRequest, SocketPath(multusShimConfig.MultusSocketDir))
 	if err != nil {
-		return nil, multusShimConfig.CNIVersion, fmt.Errorf("%s: StdinData: %s", err.Error(), string(args.StdinData))
+		return nil, multusShimConfig.CNIVersion, fmt.Errorf("%w: StdinData: %s", err, string(args.StdinData))
 	}
 
 	response := &Response{}
