@@ -28,9 +28,6 @@ jobs:
     env:
       JOB_NAME: "${{ matrix.cni-version }}-${{ matrix.multus-manifest }}"
 
-    if: >
-      (( github.event.pull_request.head.repo.owner.login != github.event.pull_request.base.repo.owner.login ) &&
-        github.event_name == 'pull_request' ) || (github.event_name == 'push' && github.event.commits != '[]' )
     steps:
       - name: Check out code into the Go module directory
         uses: actions/checkout@v4
@@ -93,7 +90,7 @@ jobs:
         if: always()
         run: |
           mkdir -p /tmp/kind/logs
-          kind export logs --loglevel=debug /tmp/kind/logs
+          kind export logs /tmp/kind/logs
 
       - name: Upload kind logs
         if: always()
