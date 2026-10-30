@@ -81,20 +81,39 @@ func printCmdArgs(args *skel.CmdArgs) string {
 		args.ContainerID, args.Netns, args.IfName, args.Args, args.Path)
 }
 
+// requestExec binds plugin execution to the shim connection. DEL also handles
+// ADD rollback, so it must remain usable after the request is canceled.
+type requestExec struct {
+	invoke.Exec
+	ctx context.Context
+}
+
+func (e *requestExec) ExecPlugin(ctx context.Context, path string, stdin []byte, env []string) ([]byte, error) {
+	if cniCommand(env) != "DEL" {
+		ctx = e.ctx
+	}
+	return e.Exec.ExecPlugin(ctx, path, stdin, env)
+}
+
 // HandleCNIRequest is the CNI server handler function; it is invoked whenever
 // a CNI request is processed.
 func (s *Server) HandleCNIRequest(cmd string, k8sArgs *types.K8sArgs, cniCmdArgs *skel.CmdArgs) ([]byte, error) {
+	return s.handleCNICommand(context.Background(), cmd, k8sArgs, cniCmdArgs)
+}
+
+func (s *Server) handleCNICommand(ctx context.Context, cmd string, k8sArgs *types.K8sArgs, cniCmdArgs *skel.CmdArgs) ([]byte, error) {
 	var result []byte
 	var err error
+	exec := &requestExec{Exec: s.exec, ctx: ctx}
 
 	logging.Verbosef("%s starting CNI request %s", cmd, printCmdArgs(cniCmdArgs))
 	switch cmd {
 	case "ADD":
-		result, err = s.cmdAdd(cniCmdArgs, k8sArgs)
+		result, err = s.cmdAdd(exec, cniCmdArgs, k8sArgs)
 	case "DEL":
 		err = s.cmdDel(cniCmdArgs, k8sArgs)
 	case "CHECK":
-		err = s.cmdCheck(cniCmdArgs, k8sArgs)
+		err = s.cmdCheck(exec, cniCmdArgs, k8sArgs)
 	default:
 		return []byte(""), fmt.Errorf("unknown cmd type: %s", cmd)
 	}
@@ -105,8 +124,13 @@ func (s *Server) HandleCNIRequest(cmd string, k8sArgs *types.K8sArgs, cniCmdArgs
 // HandleDelegateRequest is the CNI server handler function; it is invoked whenever
 // a CNI request is processed as delegate CNI request.
 func (s *Server) HandleDelegateRequest(cmd string, k8sArgs *types.K8sArgs, cniCmdArgs *skel.CmdArgs, interfaceAttributes *api.DelegateInterfaceAttributes) ([]byte, error) {
+	return s.handleDelegateCommand(context.Background(), cmd, k8sArgs, cniCmdArgs, interfaceAttributes)
+}
+
+func (s *Server) handleDelegateCommand(ctx context.Context, cmd string, k8sArgs *types.K8sArgs, cniCmdArgs *skel.CmdArgs, interfaceAttributes *api.DelegateInterfaceAttributes) ([]byte, error) {
 	var result []byte
 	var err error
+	exec := &requestExec{Exec: s.exec, ctx: ctx}
 
 	multusConfig := types.GetDefaultNetConf()
 	if err = json.Unmarshal(s.serverConfig, multusConfig); err != nil {
@@ -116,11 +140,11 @@ func (s *Server) HandleDelegateRequest(cmd string, k8sArgs *types.K8sArgs, cniCm
 	logging.Verbosef("%s starting delegate request %s", cmd, printCmdArgs(cniCmdArgs))
 	switch cmd {
 	case "ADD":
-		result, err = s.cmdDelegateAdd(cniCmdArgs, k8sArgs, multusConfig, interfaceAttributes)
+		result, err = s.cmdDelegateAdd(exec, cniCmdArgs, k8sArgs, multusConfig, interfaceAttributes)
 	case "DEL":
 		err = s.cmdDelegateDel(cniCmdArgs, k8sArgs, multusConfig)
 	case "CHECK":
-		err = s.cmdDelegateCheck(cniCmdArgs, k8sArgs, multusConfig)
+		err = s.cmdDelegateCheck(exec, cniCmdArgs, k8sArgs, multusConfig)
 	default:
 		return []byte(""), fmt.Errorf("unknown cmd type: %s", cmd)
 	}
@@ -430,7 +454,7 @@ func (s *Server) handleCNIRequest(r *http.Request) ([]byte, error) {
 		return nil, fmt.Errorf("could not extract the kubernetes runtime args: %w", err)
 	}
 
-	result, err := s.HandleCNIRequest(cmdType, k8sArgs, cniCmdArgs)
+	result, err := s.handleCNICommand(r.Context(), cmdType, k8sArgs, cniCmdArgs)
 	if err != nil {
 		// Prefix error with request information for easier debugging
 		return nil, fmt.Errorf("%s ERRORED: %v", printCmdArgs(cniCmdArgs), err)
@@ -457,7 +481,7 @@ func (s *Server) handleDelegateRequest(r *http.Request) ([]byte, error) {
 		return nil, fmt.Errorf("could not extract the kubernetes runtime args: %w", err)
 	}
 
-	result, err := s.HandleDelegateRequest(cmdType, k8sArgs, cniCmdArgs, cr.InterfaceAttributes)
+	result, err := s.handleDelegateCommand(r.Context(), cmdType, k8sArgs, cniCmdArgs, cr.InterfaceAttributes)
 	if err != nil {
 		// Prefix error with request information for easier debugging
 		return nil, fmt.Errorf("%s ERRORED: %v", printCmdArgs(cniCmdArgs), err)
@@ -603,7 +627,7 @@ func podUID(kubeclient *k8s.ClientInfo, cniArgs map[string]string, podNamespace,
 	return uid, nil
 }
 
-func (s *Server) cmdAdd(cmdArgs *skel.CmdArgs, k8sArgs *types.K8sArgs) ([]byte, error) {
+func (s *Server) cmdAdd(exec invoke.Exec, cmdArgs *skel.CmdArgs, k8sArgs *types.K8sArgs) ([]byte, error) {
 	namespace := string(k8sArgs.K8S_POD_NAMESPACE)
 	podName := string(k8sArgs.K8S_POD_NAME)
 	if namespace == "" || podName == "" {
@@ -611,7 +635,7 @@ func (s *Server) cmdAdd(cmdArgs *skel.CmdArgs, k8sArgs *types.K8sArgs) ([]byte, 
 	}
 
 	logging.Debugf("CmdAdd for [%s/%s]. CNI conf: %+v", namespace, podName, *cmdArgs)
-	result, err := multus.CmdAdd(cmdArgs, s.exec, s.kubeclient)
+	result, err := multus.CmdAdd(cmdArgs, exec, s.kubeclient)
 	if err != nil {
 		return nil, fmt.Errorf("error configuring pod [%s/%s] networking: %v", namespace, podName, err)
 	}
@@ -629,7 +653,7 @@ func (s *Server) cmdDel(cmdArgs *skel.CmdArgs, k8sArgs *types.K8sArgs) error {
 	return multus.CmdDel(cmdArgs, s.exec, s.kubeclient)
 }
 
-func (s *Server) cmdCheck(cmdArgs *skel.CmdArgs, k8sArgs *types.K8sArgs) error {
+func (s *Server) cmdCheck(exec invoke.Exec, cmdArgs *skel.CmdArgs, k8sArgs *types.K8sArgs) error {
 	namespace := string(k8sArgs.K8S_POD_NAMESPACE)
 	podName := string(k8sArgs.K8S_POD_NAME)
 	if namespace == "" || podName == "" {
@@ -637,7 +661,7 @@ func (s *Server) cmdCheck(cmdArgs *skel.CmdArgs, k8sArgs *types.K8sArgs) error {
 	}
 
 	logging.Debugf("CmdCheck for [%s/%s]. CNI conf: %+v", namespace, podName, *cmdArgs)
-	return multus.CmdCheck(cmdArgs, s.exec, s.kubeclient)
+	return multus.CmdCheck(cmdArgs, exec, s.kubeclient)
 }
 
 func serializeResult(result cnitypes.Result) ([]byte, error) {
@@ -654,7 +678,7 @@ func serializeResult(result cnitypes.Result) ([]byte, error) {
 	return responseBytes, nil
 }
 
-func (s *Server) cmdDelegateAdd(cmdArgs *skel.CmdArgs, k8sArgs *types.K8sArgs, multusConfig *types.NetConf, interfaceAttributes *api.DelegateInterfaceAttributes) ([]byte, error) {
+func (s *Server) cmdDelegateAdd(exec invoke.Exec, cmdArgs *skel.CmdArgs, k8sArgs *types.K8sArgs, multusConfig *types.NetConf, interfaceAttributes *api.DelegateInterfaceAttributes) ([]byte, error) {
 	namespace := string(k8sArgs.K8S_POD_NAMESPACE)
 	podName := string(k8sArgs.K8S_POD_NAME)
 	if namespace == "" || podName == "" {
@@ -687,7 +711,7 @@ func (s *Server) cmdDelegateAdd(cmdArgs *skel.CmdArgs, k8sArgs *types.K8sArgs, m
 
 	logging.Debugf("CmdDelegateAdd for [%s/%s]. CNI conf: %+v", namespace, podName, *cmdArgs)
 	rt, _ := types.CreateCNIRuntimeConf(cmdArgs, k8sArgs, cmdArgs.IfName, nil, delegateCNIConf)
-	result, err := multus.DelegateAdd(s.exec, s.kubeclient, pod, delegateCNIConf, rt, multusConfig)
+	result, err := multus.DelegateAdd(exec, s.kubeclient, pod, delegateCNIConf, rt, multusConfig)
 	if err != nil {
 		return nil, fmt.Errorf("error configuring pod [%s/%s] networking: %v", namespace, podName, err)
 	}
@@ -695,14 +719,14 @@ func (s *Server) cmdDelegateAdd(cmdArgs *skel.CmdArgs, k8sArgs *types.K8sArgs, m
 	return serializeResult(result)
 }
 
-func (s *Server) cmdDelegateCheck(cmdArgs *skel.CmdArgs, k8sArgs *types.K8sArgs, multusConfig *types.NetConf) error {
+func (s *Server) cmdDelegateCheck(exec invoke.Exec, cmdArgs *skel.CmdArgs, k8sArgs *types.K8sArgs, multusConfig *types.NetConf) error {
 	delegateCNIConf := &types.DelegateNetConf{}
 	if err := json.Unmarshal(cmdArgs.StdinData, delegateCNIConf); err != nil {
 		return err
 	}
 	delegateCNIConf.Bytes = cmdArgs.StdinData
 	rt, _ := types.CreateCNIRuntimeConf(cmdArgs, k8sArgs, cmdArgs.IfName, nil, delegateCNIConf)
-	return multus.DelegateCheck(s.exec, delegateCNIConf, rt, multusConfig)
+	return multus.DelegateCheck(exec, delegateCNIConf, rt, multusConfig)
 }
 
 // note: this function may send back error to the client. In cni spec, command DEL should NOT send any error
